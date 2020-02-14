@@ -5,6 +5,7 @@ defmodule SonixTest do
   alias Sonix.Tcp
 
   @pwd "SecretPassword"
+  @large_data 10_000
 
   setup do
     on_exit(&flush/0)
@@ -28,6 +29,10 @@ defmodule SonixTest do
 
   test "PUSH DATA" do
     ingest()
+  end
+
+  test "PUSH DATA LARGER THAN BUFFER" do
+    ingest_large()
   end
 
   test "POP DATA" do
@@ -56,18 +61,21 @@ defmodule SonixTest do
     conn = start_mode("ingest")
 
     prefix = "00000000-0000-0000-0000-000000000"
+
     for i <- 1..100 do
       uuid = prefix <> (i |> to_string() |> String.pad_leading(3, "0"))
       :ok = Sonix.Modes.Ingest.push(conn, "messages", uuid, "Spiderman #{i} is bad movie")
     end
+
     Sonix.quit(conn)
 
     conn = start_mode("search")
 
     {:ok, result} = Sonix.query(conn, "messages", "Spiderman", limit: 100)
-    Enum.each result, fn uuid ->
+
+    Enum.each(result, fn uuid ->
       assert String.length(uuid) === 36
-    end
+    end)
 
     Sonix.quit(conn)
   end
@@ -143,6 +151,16 @@ defmodule SonixTest do
 
     :ok =
       Sonix.Modes.Ingest.push(conn, "messages", "obj:2", "Batman and spiderwoman is good Movie")
+
+    Sonix.quit(conn)
+  end
+
+  defp ingest_large() do
+    conn = start_mode("ingest")
+
+    large_data = String.duplicate("batman ", 5_000)
+
+    :ok = Sonix.Modes.Ingest.push(conn, "messages", "obj:1", large_data)
 
     Sonix.quit(conn)
   end

@@ -31,7 +31,7 @@ defmodule Sonix.Tcp do
       PONG
   """
   def recv(conn, bytes \\ 0, timeout \\ 3000) do
-    with({:ok, response} <- do_recv(conn, bytes, timeout)) do
+    with({:ok, response} <- Connection.call(conn, {:recv, bytes, timeout})) do
       case String.trim(response) do
         "ERR " <> reason -> {:error, reason}
         response -> {:ok, response}
@@ -41,24 +41,10 @@ defmodule Sonix.Tcp do
     end
   end
 
-  defp do_recv(responses \\ [], conn, bytes, timeout) do
-    with(
-      {:ok, response} <- Connection.call(conn, {:recv, bytes, timeout})
-    ) do
-      if String.ends_with?(response, "\r\n") do
-        {:ok, Enum.reduce(responses, response, & &1 <> &2)}
-      else
-        do_recv([response | responses], conn, bytes, timeout)
-      end
-    else
-      error -> error
-    end
-  end
-
   def close(conn), do: Connection.call(conn, :close)
 
   def init({host, port, opts, timeout}) do
-    s = %{host: host, port: port, opts: opts, timeout: timeout, sock: nil}
+    s = %{host: host, port: port, opts: opts, buffer: 20_000, timeout: timeout, sock: nil}
     {:connect, :init, s}
   end
 
@@ -97,20 +83,27 @@ defmodule Sonix.Tcp do
     {:reply, {:error, :closed}, s}
   end
 
-  def handle_call({:send, data}, _, %{sock: sock} = s) do
-    case :gen_tcp.send(sock, data) do
-      :ok ->
-        {:reply, :ok, s}
+  def handle_call({:send, data}, _, %{sock: sock, buffer: buffer} = s) do
+    chunks = get_chunks(data, buffer)
 
-      {:error, _} = error ->
-        {:disconnect, error, error, s}
-    end
+    Enum.reduce_while(chunks, nil, fn ch, _acc ->
+      Logger.info("Writing chunk: #{byte_size(ch)}")
+
+      case :gen_tcp.send(sock, ch) do
+        :ok ->
+          {:cont, {:reply, :ok, s}}
+
+        {:error, _} = error ->
+          {:halt, {:disconnect, error, error, s}}
+      end
+    end)
   end
 
   def handle_call({:recv, bytes, timeout}, _, %{sock: sock} = s) do
-    case :gen_tcp.recv(sock, bytes, timeout) do
-      {:ok, _} = ok ->
-        {:reply, ok, s}
+    case do_recv(sock, bytes, timeout) do
+      {:ok, res} ->
+        {res, s} = handle_result({res, s})
+        {:reply, {:ok, res}, s}
 
       {:error, :timeout} = error ->
         {:reply, error, s}
@@ -122,5 +115,46 @@ defmodule Sonix.Tcp do
 
   def handle_call(:close, from, s) do
     {:disconnect, {:close, from}, s}
+  end
+
+  defp get_chunks(data, buffer, chunks \\ []) do
+    case byte_size(data) > buffer do
+      true ->
+        get_chunks(String.slice(data, 0..-buffer), buffer, [
+          String.slice(data, -buffer, buffer) | chunks
+        ])
+
+      false ->
+        [data | chunks]
+    end
+  end
+
+  defp do_recv(responses \\ [], sock, bytes, timeout) do
+    with({:ok, response} <- :gen_tcp.recv(sock, bytes, timeout)) do
+      if String.ends_with?(response, "\r\n") do
+        {:ok,
+         responses
+         |> Enum.reduce(response, &(&1 <> &2))
+         |> String.trim()}
+      else
+        do_recv([response | responses], sock, bytes, timeout)
+      end
+    else
+      error -> error
+    end
+  end
+
+  def handle_result({<<"STARTED ", info::binary()>> = res, s}) do
+    {res, %{s | buffer: get_buffer(info)}}
+  end
+
+  def handle_result({res, s}), do: {res, s}
+
+  def get_buffer(info) do
+    [_, _, buffer] = String.split(info)
+
+    buffer
+    |> String.slice(7..-2)
+    |> String.to_integer()
   end
 end
